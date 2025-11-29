@@ -1,29 +1,40 @@
-import requests
 import json
+import urllib3
+from urllib.parse import urlencode
+
+# Initialize HTTP client
+http = urllib3.PoolManager()
 
 def geocode_location(location):
     """Convert location name to coordinates using Nominatim API."""
-    url = "https://nominatim.openstreetmap.org/search"
     params = {
         'q': location,
         'format': 'json',
         'limit': 1
     }
-    headers = {
-        'User-Agent': 'FoodBusinessFinder/1.0'
-    }
     
-    response = requests.get(url, params=params, headers=headers)
-    data = response.json()
+    url = f"https://nominatim.openstreetmap.org/search?{urlencode(params)}"
     
-    if not data:
+    try:
+        response = http.request(
+            'GET',
+            url,
+            headers={'User-Agent': 'FoodBusinessFinder-Lambda/1.0'}
+        )
+        
+        data = json.loads(response.data.decode('utf-8'))
+        
+        if not data:
+            return None
+        
+        return {
+            'lat': float(data[0]['lat']),
+            'lon': float(data[0]['lon']),
+            'display_name': data[0]['display_name']
+        }
+    except Exception as e:
+        print(f"Geocoding error: {e}")
         return None
-    
-    return {
-        'lat': float(data[0]['lat']),
-        'lon': float(data[0]['lon']),
-        'display_name': data[0]['display_name']
-    }
 
 def get_food_businesses(lat, lon, radius=1000):
     """Fetch food businesses from OpenStreetMap using Overpass API."""
@@ -31,7 +42,7 @@ def get_food_businesses(lat, lon, radius=1000):
     
     # Overpass QL query for various food-related amenities
     query = f"""
-    [out:json];
+    [out:json][timeout:25];
     (
       node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|bistro"](around:{radius},{lat},{lon});
       node["shop"~"bakery|butcher|deli|seafood|greengrocer|convenience|supermarket|alcohol|beverages|coffee|confectionery|cheese|chocolate|tea|pastry|spices|organic"](around:{radius},{lat},{lon});
@@ -41,103 +52,170 @@ def get_food_businesses(lat, lon, radius=1000):
     """
     
     try:
-        response = requests.get(overpass_url, params={'data': query}, timeout=30)
-        response.raise_for_status()
+        response = http.request(
+            'POST',
+            overpass_url,
+            fields={'data': query},
+            timeout=30.0
+        )
         
-        # Check if response is actually JSON
-        content_type = response.headers.get('content-type', '')
-        if 'json' not in content_type:
-            print(f"Warning: Unexpected content type: {content_type}")
-            print(f"Response text: {response.text[:200]}")
+        # Check if response is successful
+        if response.status != 200:
+            print(f"Overpass API error: Status {response.status}")
             return []
         
-        data = response.json()
+        data = json.loads(response.data.decode('utf-8'))
         return data.get('elements', [])
     
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data: {e}")
-        return []
-    except json.JSONDecodeError as e:
-        print(f"Error parsing JSON response: {e}")
-        print(f"Response text: {response.text[:500]}")
+    except Exception as e:
+        print(f"Error fetching businesses: {e}")
         return []
 
 def format_business(business):
     """Format business information for display."""
     tags = business.get('tags', {})
-    name = tags.get('name', 'Unnamed')
-    amenity = tags.get('amenity', tags.get('shop', 'N/A'))
-    cuisine = tags.get('cuisine', 'N/A')
-    address = tags.get('addr:street', 'N/A')
-    phone = tags.get('phone', 'N/A')
     
     return {
-        'name': name,
-        'type': amenity,
-        'cuisine': cuisine,
-        'address': address,
-        'phone': phone,
+        'name': tags.get('name', 'Unnamed'),
+        'type': tags.get('amenity', tags.get('shop', 'N/A')),
+        'cuisine': tags.get('cuisine', 'N/A'),
+        'address': tags.get('addr:street', 'N/A'),
+        'housenumber': tags.get('addr:housenumber', 'N/A'),
+        'city': tags.get('addr:city', 'N/A'),
+        'phone': tags.get('phone', 'N/A'),
+        'website': tags.get('website', 'N/A'),
+        'opening_hours': tags.get('opening_hours', 'N/A'),
         'lat': business.get('lat'),
         'lon': business.get('lon')
     }
 
-def main():
-    print("=" * 60)
-    print("Food Business Finder")
-    print("=" * 60)
+def lambda_handler(event, context):
+    """
+    AWS Lambda handler function.
     
-    location = input("\nEnter a location (city, address, or place name): ").strip()
+    Expected input via URL query parameters:
+    GET /food-businesses?location=Cork%20City&radius=1000
     
-    if not location:
-        print("No location provided. Exiting.")
-        return
+    Or via POST body:
+    {
+        "location": "Cork City",
+        "radius": 1000
+    }
     
-    print(f"\nGeocoding '{location}'...")
-    coords = geocode_location(location)
+    Returns:
+    {
+        "statusCode": 200,
+        "body": {
+            "location": {...},
+            "businesses": [...],
+            "count": 123
+        }
+    }
+    """
     
-    if not coords:
-        print("Location not found. Please try a different search term.")
-        return
+    try:
+        # Parse input - check query string parameters first, then body
+        query_params = event.get('queryStringParameters', {}) or {}
+        
+        location = query_params.get('location')
+        radius = query_params.get('radius', 1000)
+        
+        # If not in query params, check body
+        if not location:
+            if isinstance(event.get('body'), str):
+                body = json.loads(event['body'])
+            else:
+                body = event.get('body', event)
+            
+            location = body.get('location')
+            radius = body.get('radius', radius)
+        
+        if not location:
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'error': 'Missing required parameter: location'
+                })
+            }
+        
+        # Validate radius
+        try:
+            radius = int(radius)
+            if radius < 100 or radius > 5000:
+                radius = 1000
+        except (ValueError, TypeError):
+            radius = 1000
+        
+        # Geocode location
+        coords = geocode_location(location)
+        
+        if not coords:
+            return {
+                'statusCode': 404,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'error': f'Location not found: {location}'
+                })
+            }
+        
+        # Get food businesses
+        businesses = get_food_businesses(coords['lat'], coords['lon'], radius)
+        
+        # Format results
+        formatted = [format_business(b) for b in businesses]
+        formatted.sort(key=lambda x: x['name'].lower())
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
+                'location': {
+                    'query': location,
+                    'display_name': coords['display_name'],
+                    'coordinates': {
+                        'lat': coords['lat'],
+                        'lon': coords['lon']
+                    },
+                    'radius_meters': radius
+                },
+                'businesses': formatted,
+                'count': len(formatted)
+            })
+        }
     
-    print(f"Found: {coords['display_name']}")
-    print(f"Coordinates: {coords['lat']}, {coords['lon']}")
-    
-    radius = input("\nEnter search radius in meters (default 1000): ").strip()
-    radius = int(radius) if radius.isdigit() else 1000
-    
-    print(f"\nSearching for food businesses within {radius}m...")
-    businesses = get_food_businesses(coords['lat'], coords['lon'], radius)
-    
-    if not businesses:
-        print("No food businesses found in this area.")
-        return
-    
-    print(f"\nFound {len(businesses)} food-related businesses:\n")
-    print("=" * 60)
-    
-    formatted = [format_business(b) for b in businesses]
-    formatted.sort(key=lambda x: x['name'])
-    
-    for i, biz in enumerate(formatted, 1):
-        print(f"\n{i}. {biz['name']}")
-        print(f"   Type: {biz['type']}")
-        if biz['cuisine'] != 'N/A':
-            print(f"   Cuisine: {biz['cuisine']}")
-        if biz['address'] != 'N/A':
-            print(f"   Address: {biz['address']}")
-        if biz['phone'] != 'N/A':
-            print(f"   Phone: {biz['phone']}")
-    
-    print("\n" + "=" * 60)
-    print(f"Total: {len(businesses)} businesses")
-    
-    # Ask if user wants to save results
-    save = input("\nSave results to JSON file? (y/n): ").strip().lower()
-    if save == 'y':
-        filename = f"food_businesses_{location.replace(' ', '_')}.json"
-        with open(filename, 'w') as f:
-            json.dump(formatted, f, indent=2)
-        print(f"Results saved to {filename}")
+    except Exception as e:
+        print(f"Lambda error: {e}")
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
+                'error': 'Internal server error',
+                'message': str(e)
+            })
+        }
 
+# For local testing
 if __name__ == "__main__":
-    main()
+    # Test with query parameters
+    test_event = {
+        "queryStringParameters": {
+            "location": "Cork City",
+            "radius": "500"
+        }
+    }
+    
+    result = lambda_handler(test_event, None)
+    print(json.dumps(json.loads(result['body']), indent=2))
