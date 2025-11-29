@@ -89,51 +89,66 @@ def format_business(business):
     }
 
 def lambda_handler(event, context):
+    # 1. Define Standard Headers (We need these for every response)
+    headers = {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    }
+
     try:
-        # Parse inputs
+        # 2. HANDLE CORS PREFLIGHT (The Fix)
+        # Check if the browser is just asking for permission (OPTIONS method)
+        http_method = event.get('requestContext', {}).get('http', {}).get('method')
+        if http_method == 'OPTIONS':
+            return {
+                "statusCode": 200,
+                "headers": headers,
+                "body": ""
+            }
+
+        # 3. Parse Inputs
         query_params = event.get('queryStringParameters') or {}
         location = query_params.get('location')
         radius = query_params.get('radius', 1000)
         
-        # Fallback to body
+        # Fallback to body if not in URL
         if not location:
             body = event.get('body', '{}')
             try:
                 body_json = json.loads(body) if isinstance(body, str) else body
-                location = body_json.get('location')
-                radius = body_json.get('radius', radius)
+                # Handle case where body might be empty or None
+                if body_json:
+                    location = body_json.get('location')
+                    radius = body_json.get('radius', radius)
             except:
                 pass
 
         if not location:
             return {
                 "statusCode": 400,
-                "headers": {"Content-Type": "application/json"},
+                "headers": headers, # Use the defined headers
                 "body": json.dumps({"error": "Missing 'location' parameter"})
             }
 
-        # Logic
+        # 4. Run Logic
         coords = geocode_location(location)
         if not coords:
             return {
                 "statusCode": 404,
-                "headers": {"Content-Type": "application/json"},
+                "headers": headers, # Use the defined headers
                 "body": json.dumps({"error": f"Could not find location: {location}"})
             }
 
         businesses = get_food_businesses(coords['lat'], coords['lon'], radius)
         formatted = [format_business(b) for b in businesses]
         
-        # Sort by name
         formatted.sort(key=lambda x: x['name'].lower())
 
         return {
             "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST"
-            },
+            "headers": headers, # Use the defined headers
             "body": json.dumps({
                 "location": {
                     "query": location,
@@ -147,8 +162,9 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
+        print(f"Error: {str(e)}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
+            "headers": headers, # Use the defined headers
             "body": json.dumps({"error": str(e)})
         }
