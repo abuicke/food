@@ -1,208 +1,154 @@
 import json
-import urllib3
-from urllib.parse import urlencode
-
-# Initialize HTTP client
-http = urllib3.PoolManager()
+import urllib.request
+import urllib.parse
+import urllib.error
 
 def geocode_location(location):
     """Convert location name to coordinates using Nominatim API."""
-    params = {
-        'q': location,
-        'format': 'json',
-        'limit': 1
-    }
+    params = {'q': location, 'format': 'json', 'limit': 1}
+    # Headers are required by OSM policy
+    headers = {'User-Agent': 'FoodBusinessFinder-Lambda/1.0'}
     
-    url = f"https://nominatim.openstreetmap.org/search?{urlencode(params)}"
+    url = f"https://nominatim.openstreetmap.org/search?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers=headers)
     
     try:
-        response = http.request(
-            'GET',
-            url,
-            headers={'User-Agent': 'FoodBusinessFinder-Lambda/1.0'}
-        )
-        
-        data = json.loads(response.data.decode('utf-8'))
-        
-        if not data:
-            return None
-        
-        return {
-            'lat': float(data[0]['lat']),
-            'lon': float(data[0]['lon']),
-            'display_name': data[0]['display_name']
-        }
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            if not data:
+                return None
+            return {
+                'lat': float(data[0]['lat']),
+                'lon': float(data[0]['lon']),
+                'display_name': data[0]['display_name']
+            }
     except Exception as e:
         print(f"Geocoding error: {e}")
         return None
 
 def get_food_businesses(lat, lon, radius=1000):
     """Fetch food businesses from OpenStreetMap using Overpass API."""
-    overpass_url = "http://overpass-api.de/api/interpreter"
+    overpass_url = "https://overpass-api.de/api/interpreter"
     
-    # Overpass QL query - EXACT SAME AS CLI VERSION
+    # Overpass QL query
     query = f"""
-    [out:json];
+    [out:json][timeout:25];
     (
       node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|bistro"](around:{radius},{lat},{lon});
+      way["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|bistro"](around:{radius},{lat},{lon});
       node["shop"~"bakery|butcher|deli|seafood|greengrocer|convenience|supermarket|alcohol|beverages|coffee|confectionery|cheese|chocolate|tea|pastry|spices|organic"](around:{radius},{lat},{lon});
-      node["cuisine"](around:{radius},{lat},{lon});
+      way["shop"~"bakery|butcher|deli|seafood|greengrocer|convenience|supermarket|alcohol|beverages|coffee|confectionery|cheese|chocolate|tea|pastry|spices|organic"](around:{radius},{lat},{lon});
     );
-    out body;
+    out center;
     """
     
-    try:
-        response = http.request(
-            'POST',
-            overpass_url,
-            fields={'data': query},
-            timeout=30.0
-        )
-        
-        # Check if response is successful
-        if response.status != 200:
-            print(f"Overpass API error: Status {response.status}")
-            return []
-        
-        data = json.loads(response.data.decode('utf-8'))
-        return data.get('elements', [])
+    # 1. ENCODING: Overpass expects 'data=' in the body
+    data = urllib.parse.urlencode({'data': query}).encode('utf-8')
     
+    # 2. HEADERS: This was the missing piece causing the empty list
+    headers = {
+        'User-Agent': 'FoodBusinessFinder-Lambda/1.0',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    
+    req = urllib.request.Request(overpass_url, data=data, headers=headers, method='POST')
+    
+    try:
+        # Increase timeout slightly for Overpass
+        with urllib.request.urlopen(req, timeout=30) as response:
+            if response.status != 200:
+                print(f"Overpass API error: Status {response.status}")
+                return []
+            
+            result = json.loads(response.read().decode('utf-8'))
+            return result.get('elements', [])
+            
     except Exception as e:
         print(f"Error fetching businesses: {e}")
         return []
 
 def format_business(business):
-    """Format business information for display."""
     tags = business.get('tags', {})
+    
+    # Handle 'ways' (buildings) which have a 'center' lat/lon
+    if business.get('type') == 'way':
+        lat = business.get('center', {}).get('lat')
+        lon = business.get('center', {}).get('lon')
+    else:
+        lat = business.get('lat')
+        lon = business.get('lon')
     
     return {
         'name': tags.get('name', 'Unnamed'),
         'type': tags.get('amenity', tags.get('shop', 'N/A')),
         'cuisine': tags.get('cuisine', 'N/A'),
         'address': tags.get('addr:street', 'N/A'),
-        'housenumber': tags.get('addr:housenumber', 'N/A'),
         'city': tags.get('addr:city', 'N/A'),
-        'phone': tags.get('phone', 'N/A'),
-        'website': tags.get('website', 'N/A'),
-        'opening_hours': tags.get('opening_hours', 'N/A'),
-        'lat': business.get('lat'),
-        'lon': business.get('lon')
+        'lat': lat,
+        'lon': lon
     }
 
 def lambda_handler(event, context):
-    """
-    AWS Lambda handler function.
-    
-    Expected input via URL query parameters:
-    GET /food-businesses?location=Cork%20City&radius=1000
-    
-    Or via POST body:
-    {
-        "location": "Cork City",
-        "radius": 1000
-    }
-    
-    Returns:
-    {
-        "statusCode": 200,
-        "body": {
-            "location": {...},
-            "businesses": [...],
-            "count": 123
-        }
-    }
-    """
-    
     try:
-        # Parse input - check query string parameters first, then body
-        query_params = event.get('queryStringParameters', {}) or {}
-        
+        # Parse inputs
+        query_params = event.get('queryStringParameters') or {}
         location = query_params.get('location')
         radius = query_params.get('radius', 1000)
         
-        # If not in query params, check body
+        # Fallback to body
         if not location:
-            if isinstance(event.get('body'), str):
-                body = json.loads(event['body'])
-            else:
-                body = event.get('body', event)
-            
-            location = body.get('location')
-            radius = body.get('radius', radius)
-        
+            body = event.get('body', '{}')
+            try:
+                body_json = json.loads(body) if isinstance(body, str) else body
+                location = body_json.get('location')
+                radius = body_json.get('radius', radius)
+            except:
+                pass
+
         if not location:
             return {
-                'statusCode': 400,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
-                    'error': 'Missing required parameter: location'
-                })
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": "Missing 'location' parameter"})
             }
-        
-        # Validate radius
-        try:
-            radius = int(radius)
-            if radius < 100 or radius > 5000:
-                radius = 1000
-        except (ValueError, TypeError):
-            radius = 1000
-        
-        # Geocode location
+
+        # Logic
         coords = geocode_location(location)
-        
         if not coords:
             return {
-                'statusCode': 404,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
-                    'error': f'Location not found: {location}'
-                })
+                "statusCode": 404,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": f"Could not find location: {location}"})
             }
-        
-        # Get food businesses
+
         businesses = get_food_businesses(coords['lat'], coords['lon'], radius)
-        
-        # Format results
         formatted = [format_business(b) for b in businesses]
-        formatted.sort(key=lambda x: x['name'].lower())
         
+        # Sort by name
+        formatted.sort(key=lambda x: x['name'].lower())
+
         return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST"
             },
-            'body': json.dumps({
-                'location': {
-                    'query': location,
-                    'display_name': coords['display_name'],
-                    'coordinates': {
-                        'lat': coords['lat'],
-                        'lon': coords['lon']
-                    },
-                    'radius_meters': radius
+            "body": json.dumps({
+                "location": {
+                    "query": location,
+                    "display_name": coords['display_name'],
+                    "coordinates": {'lat': coords['lat'], 'lon': coords['lon']},
+                    "radius_meters": radius
                 },
-                'businesses': formatted,
-                'count': len(formatted)
+                "count": len(formatted),
+                "businesses": formatted
             })
         }
-    
+
     except Exception as e:
-        print(f"Lambda error: {e}")
         return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'error': 'Internal server error',
-                'message': str(e)
-            })
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": str(e)})
         }
