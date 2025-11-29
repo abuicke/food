@@ -13,11 +13,16 @@
       href="https://cdn.datatables.net/1.13.7/css/dataTables.bootstrap5.min.css"
       rel="stylesheet"
     />
+    <link
+      href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.bootstrap5.min.css"
+      rel="stylesheet"
+    />
 
     <style>
       body {
         padding: 20px;
         background-color: #f8f9fa;
+        font-family: sans-serif;
       }
       .container {
         max-width: 1200px;
@@ -28,6 +33,11 @@
       }
       #loading {
         display: none;
+      }
+      /* Space out the export buttons slightly */
+      .dt-buttons .btn {
+        margin-right: 5px;
+        margin-bottom: 15px;
       }
     </style>
   </head>
@@ -74,7 +84,7 @@
               <th>Type</th>
               <th>Cuisine</th>
               <th>Address</th>
-              <th>Distance</th>
+              <th>Map</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -85,6 +95,10 @@
     <script src="https://code.jquery.com/jquery-3.7.0.js"></script>
     <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
 
     <script>
       // Your specific Lambda URL
@@ -94,48 +108,55 @@
       let table = null;
 
       async function fetchData() {
-        // 1. Get inputs
         const location = document.getElementById("location").value;
         const radius = document.getElementById("radius").value;
 
         if (!location) return alert("Please enter a location");
 
-        // 2. UI Updates
+        // UI Reset
         document.getElementById("loading").style.display = "block";
         if (table) {
-          table.clear().draw(); // Clear existing table data if it exists
+          table.clear().draw();
+          // We destroy it to re-initialize with new filename for export
+          table.destroy();
         }
 
         try {
-          // 3. Construct URL with query parameters
+          // Fetch
           const url = `${API_URL}?location=${encodeURIComponent(
             location
           )}&radius=${encodeURIComponent(radius)}`;
-
-          // 4. Fetch Data
           const response = await fetch(url);
           const data = await response.json();
 
-          // Check for API errors
           if (data.error) {
             alert("Error: " + data.error);
             return;
           }
 
-          // 5. Populate DataTables
-          // We use the DataTables API to add data so sorting works instantly
-          if (table) {
-            table.destroy(); // Reset table to load new data cleanly
-          }
-
+          // Initialize DataTable with Buttons
           table = $("#resultsTable").DataTable({
-            data: data.businesses, // Pass the 'businesses' array directly
+            data: data.businesses,
+            dom: "Bfrtip", // Defines layout: Buttons, Filter, pRocessing, Table, Info, Pagination
+            buttons: [
+              {
+                extend: "excelHtml5",
+                text: "Download Excel",
+                className: "btn btn-success btn-sm",
+                title: `Food_Businesses_${location}`, // Naming the file automatically
+              },
+              {
+                extend: "csvHtml5",
+                text: "Download CSV",
+                className: "btn btn-secondary btn-sm",
+                title: `Food_Businesses_${location}`,
+              },
+            ],
             columns: [
               { data: "name", defaultContent: "<i>Unnamed</i>" },
               {
                 data: "type",
                 render: function (data) {
-                  // Capitalize first letter (e.g., "restaurant")
                   return data
                     ? data.charAt(0).toUpperCase() +
                         data.slice(1).replace("_", " ")
@@ -144,7 +165,7 @@
               },
               { data: "cuisine", defaultContent: "-" },
               {
-                data: null, // Combine street and city for Address column
+                data: null,
                 render: function (data, type, row) {
                   let addr = row.address !== "N/A" ? row.address : "";
                   let city = row.city !== "N/A" ? row.city : "";
@@ -152,15 +173,15 @@
                 },
               },
               {
-                // Hidden helper column for coordinates if you need them later
                 data: null,
                 render: function (data, type, row) {
-                  return `<a href="https://www.google.com/maps/search/?api=1&query=${row.lat},${row.lon}" target="_blank">View Map</a>`;
+                  // Create a Google Maps Link
+                  return `<a href="https://www.google.com/maps?q=${row.lat},${row.lon}" target="_blank" class="btn btn-outline-primary btn-sm">View</a>`;
                 },
               },
             ],
             order: [[0, "asc"]], // Default sort by Name
-            pageLength: 25, // Show 25 rows by default
+            pageLength: 25,
           });
         } catch (error) {
           console.error(error);
@@ -172,7 +193,7 @@
 
       // Initialize empty table on load
       $(document).ready(function () {
-        table = $("#resultsTable").DataTable();
+        table = $("#resultsTable").DataTable({ dom: "Bfrtip", buttons: [] });
       });
     </script>
   </body>
