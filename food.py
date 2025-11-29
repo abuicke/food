@@ -38,19 +38,17 @@ def geocode_location(location):
 
 def get_food_businesses(lat, lon, radius=1000):
     """Fetch food businesses from OpenStreetMap using Overpass API."""
-    overpass_url = "https://overpass-api.de/api/interpreter"
+    overpass_url = "http://overpass-api.de/api/interpreter"
     
-    # Overpass QL query for various food-related amenities
-    # Include both nodes and ways (buildings)
+    # Overpass QL query - EXACT SAME AS CLI VERSION
     query = f"""
-    [out:json][timeout:25];
+    [out:json];
     (
       node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|bistro"](around:{radius},{lat},{lon});
-      way["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|bistro"](around:{radius},{lat},{lon});
       node["shop"~"bakery|butcher|deli|seafood|greengrocer|convenience|supermarket|alcohol|beverages|coffee|confectionery|cheese|chocolate|tea|pastry|spices|organic"](around:{radius},{lat},{lon});
-      way["shop"~"bakery|butcher|deli|seafood|greengrocer|convenience|supermarket|alcohol|beverages|coffee|confectionery|cheese|chocolate|tea|pastry|spices|organic"](around:{radius},{lat},{lon});
+      node["cuisine"](around:{radius},{lat},{lon});
     );
-    out center;
+    out body;
     """
     
     try:
@@ -77,14 +75,6 @@ def format_business(business):
     """Format business information for display."""
     tags = business.get('tags', {})
     
-    # For ways (buildings), use center coordinates
-    if business.get('type') == 'way':
-        lat = business.get('center', {}).get('lat')
-        lon = business.get('center', {}).get('lon')
-    else:
-        lat = business.get('lat')
-        lon = business.get('lon')
-    
     return {
         'name': tags.get('name', 'Unnamed'),
         'type': tags.get('amenity', tags.get('shop', 'N/A')),
@@ -95,8 +85,8 @@ def format_business(business):
         'phone': tags.get('phone', 'N/A'),
         'website': tags.get('website', 'N/A'),
         'opening_hours': tags.get('opening_hours', 'N/A'),
-        'lat': lat,
-        'lon': lon
+        'lat': business.get('lat'),
+        'lon': business.get('lon')
     }
 
 def lambda_handler(event, context):
@@ -216,16 +206,3 @@ def lambda_handler(event, context):
                 'message': str(e)
             })
         }
-
-# For local testing
-if __name__ == "__main__":
-    # Test with query parameters
-    test_event = {
-        "queryStringParameters": {
-            "location": "Cork City",
-            "radius": "500"
-        }
-    }
-    
-    result = lambda_handler(test_event, None)
-    print(json.dumps(json.loads(result['body']), indent=2))
